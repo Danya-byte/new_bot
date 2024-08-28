@@ -236,7 +236,7 @@ async def view_cart(message: types.Message):
 
     cart_text += f'\nИтого: {total_price} руб.'
 
-    # Добавление кнопки "Купить"
+   
     keyboard.append([InlineKeyboardButton(text='Купить', callback_data='buy')])
 
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -310,7 +310,7 @@ async def delete_burger(callback_query: types.CallbackQuery):
             builder = InlineKeyboardBuilder()
             for i in range(1, quantity + 1):
                 builder.add(InlineKeyboardButton(text=str(i), callback_data=f'remove_{burger_id}_{i}'))
-            builder.adjust(3)  # Распределение кнопок по 3 в ряд
+            builder.adjust(3)  
 
             await bot.send_message(
                 chat_id=callback_query.message.chat.id,
