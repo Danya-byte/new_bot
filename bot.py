@@ -1,13 +1,13 @@
+import asyncio
+import atexit
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from aiogram.filters import Command
 import config
 import database
 import logging
-import asyncio
-from telegram_api import send_message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -16,37 +16,37 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 dp.setup_bot(bot)
 
-# Создаем словарь для хранения состояния пользователей
-user_states = {}
+commands = [
+    '/start - Приветственное сообщение',
+    '/help - Список доступных команд',
+    '/burgers - Просмотр списка бургеров',
+    '/cart - Просмотр корзины'
+]
+
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    commands = [
-        '/start - Приветственное сообщение',
-        '/help - Список доступных команд',
-        '/burgers - Просмотр списка бургеров',
-        '/cart - Просмотр корзины',
-        '/remove_from_cart - Удалить бургер из корзины',
-        '/admin_remove_burger - Удалить бургер из базы данных (только для администратора)'
-    ]
-    await message.reply(
-        'Добро пожаловать в наш магазин бургеров!\n\nДоступные команды:\n' + '\n'.join(commands))
+    user_id = message.from_user.id
+    state = await database.async_get_user_state(user_id)
+    if state:
+        await message.reply(f'Добро пожаловать обратно! Последний раз вы были: {state}')
+    else:
+        await message.reply('Добро пожаловать в наш магазин бургеров!')
+    await database.async_save_user_state(user_id, 'start')
+    await message.reply('Доступные команды:\n' + '\n'.join(commands))
+
 
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
-    commands = [
-        '/start - Приветственное сообщение',
-        '/help - Список доступных команд',
-        '/burgers - Просмотр списка бургеров',
-        '/cart - Просмотр корзины',
-        '/remove_from_cart - Удалить бургер из корзины',
-        '/admin_remove_burger - Удалить бургер из базы данных (только для администратора)'
-    ]
+    user_id = message.from_user.id
+    await database.async_save_user_state(user_id, 'help')
     await message.reply('Доступные команды:\n' + '\n'.join(commands))
 
 
 @dp.message(Command("burgers"))
 async def list_burgers(message: types.Message):
+    user_id = message.from_user.id
+    await database.async_save_user_state(user_id, 'burgers')
     burgers = await database.async_get_burgers()
     if not burgers:
         await message.reply('Бургеров пока нет.')
@@ -54,9 +54,6 @@ async def list_burgers(message: types.Message):
 
     keyboard = []
     for burger in burgers:
-
-        print(f"Burger: {burger}")
-
         keyboard.append([InlineKeyboardButton(text=burger[1], callback_data=f'burger_{burger[0]}')])
 
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -69,33 +66,28 @@ async def burger_details(callback_query: types.CallbackQuery):
 
     burger_id = int(callback_query.data.split('_')[1])
     burgers = await database.async_get_burgers()
-
-    print(f"All burgers: {burgers}")
-
     burger = next((b for b in burgers if b[0] == burger_id), None)
-
-    print(f"Selected burger: {burger}")
 
     if burger:
         text = f'{burger[1]}\n\n{burger[2]}\n\nЦена: {burger[3]}'
         user_id = callback_query.from_user.id
-        if user_id not in user_states:
-            user_states[user_id] = {}
-        if 'quantity' not in user_states[user_id]:
-            user_states[user_id]['quantity'] = 1
-        quantity = user_states[user_id]['quantity']
+        await database.async_save_user_state(user_id, f'awaiting_quantity_{burger_id}_1')
 
-        keyboard = [
-            [
-                InlineKeyboardButton(text='-', callback_data=f'decrease_{burger[0]}'),
-                InlineKeyboardButton(text=str(quantity), callback_data=f'quantity_{burger[0]}'),
-                InlineKeyboardButton(text='+', callback_data=f'increase_{burger[0]}')
-            ],
-            [InlineKeyboardButton(text='Добавить в корзину', callback_data=f'add_to_cart_{burger[0]}_{quantity}')]
-        ]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        await bot.edit_message_text(text=text, chat_id=callback_query.message.chat.id,
-                                    message_id=callback_query.message.message_id, reply_markup=reply_markup)
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text='-', callback_data=f'decrease_{burger_id}'),
+            InlineKeyboardButton(text='1', callback_data=f'quantity_{burger_id}_1'),
+            InlineKeyboardButton(text='+', callback_data=f'increase_{burger_id}')
+        )
+        builder.row(
+            InlineKeyboardButton(text='Добавить в корзину', callback_data=f'add_to_cart_{burger_id}')
+        )
+
+        await bot.send_message(callback_query.message.chat.id, f'{text}\n\nВыберите количество бургеров:',
+                               reply_markup=builder.as_markup())
+    else:
+        await bot.send_message(callback_query.message.chat.id, 'Бургер не найден.')
+
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('increase_'))
 async def increase_quantity(callback_query: types.CallbackQuery):
@@ -103,14 +95,29 @@ async def increase_quantity(callback_query: types.CallbackQuery):
 
     burger_id = int(callback_query.data.split('_')[1])
     user_id = callback_query.from_user.id
-    if user_id not in user_states:
-        user_states[user_id] = {}
-    if 'quantity' not in user_states[user_id]:
-        user_states[user_id]['quantity'] = 1
-    user_states[user_id]['quantity'] += 1
-    quantity = user_states[user_id]['quantity']
+    state = await database.async_get_user_state(user_id)
 
-    await update_quantity(callback_query, burger_id, quantity)
+    if state and state.startswith('awaiting_quantity_'):
+        current_quantity = int(state.split('_')[3])
+        new_quantity = current_quantity + 1
+        await database.async_save_user_state(user_id, f'awaiting_quantity_{burger_id}_{new_quantity}')
+
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text='-', callback_data=f'decrease_{burger_id}'),
+            InlineKeyboardButton(text=str(new_quantity), callback_data=f'quantity_{burger_id}_{new_quantity}'),
+            InlineKeyboardButton(text='+', callback_data=f'increase_{burger_id}')
+        )
+        builder.row(
+            InlineKeyboardButton(text='Добавить в корзину', callback_data=f'add_to_cart_{burger_id}')
+        )
+
+        await bot.edit_message_reply_markup(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.message_id,
+            reply_markup=builder.as_markup()
+        )
+
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('decrease_'))
 async def decrease_quantity(callback_query: types.CallbackQuery):
@@ -118,33 +125,28 @@ async def decrease_quantity(callback_query: types.CallbackQuery):
 
     burger_id = int(callback_query.data.split('_')[1])
     user_id = callback_query.from_user.id
-    if user_id not in user_states:
-        user_states[user_id] = {}
-    if 'quantity' not in user_states[user_id]:
-        user_states[user_id]['quantity'] = 1
-    user_states[user_id]['quantity'] = max(1, user_states[user_id]['quantity'] - 1)
-    quantity = user_states[user_id]['quantity']
+    state = await database.async_get_user_state(user_id)
 
-    await update_quantity(callback_query, burger_id, quantity)
+    if state and state.startswith('awaiting_quantity_'):
+        current_quantity = int(state.split('_')[3])
+        new_quantity = max(current_quantity - 1, 1)
+        await database.async_save_user_state(user_id, f'awaiting_quantity_{burger_id}_{new_quantity}')
 
-async def update_quantity(callback_query: types.CallbackQuery, burger_id: int, quantity: int):
-    await bot.answer_callback_query(callback_query.id)
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text='-', callback_data=f'decrease_{burger_id}'),
+            InlineKeyboardButton(text=str(new_quantity), callback_data=f'quantity_{burger_id}_{new_quantity}'),
+            InlineKeyboardButton(text='+', callback_data=f'increase_{burger_id}')
+        )
+        builder.row(
+            InlineKeyboardButton(text='Добавить в корзину', callback_data=f'add_to_cart_{burger_id}')
+        )
 
-    burgers = await database.async_get_burgers()
-    burger = next((b for b in burgers if b[0] == burger_id), None)
-
-    if burger:
-        text = f'{burger[1]}\n\n{burger[2]}\n\nЦена: {burger[3]}'
-        keyboard = [
-            [
-                InlineKeyboardButton(text='-', callback_data=f'decrease_{burger[0]}'),
-                InlineKeyboardButton(text=str(quantity), callback_data=f'quantity_{burger[0]}'),
-                InlineKeyboardButton(text='+', callback_data=f'increase_{burger[0]}')
-            ],
-            [InlineKeyboardButton(text='Добавить в корзину', callback_data=f'add_to_cart_{burger[0]}_{quantity}')]
-        ]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        await bot.edit_message_text(text=text, chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id, reply_markup=reply_markup)
+        await bot.edit_message_reply_markup(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.message_id,
+            reply_markup=builder.as_markup()
+        )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('add_to_cart_'))
@@ -152,37 +154,64 @@ async def add_to_cart(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
 
     data_parts = callback_query.data.split('_')
-    if len(data_parts) == 4 and data_parts[0] == 'add_to_cart' and data_parts[1].isdigit() and data_parts[2].isdigit():
-        burger_id = int(data_parts[1])
-        quantity = int(data_parts[2])
-        user_id = callback_query.from_user.id
+    print(f"Callback data: {callback_query.data}")  # Добавлено для отладки
 
-        print(f"Adding to cart: user_id={user_id}, burger_id={burger_id}, quantity={quantity}")
+    if len(data_parts) < 4:
+        await bot.send_message(callback_query.message.chat.id, 'Ошибка: некорректные данные.')
+        return
 
-        database.add_to_cart(user_id, burger_id, quantity)
+    try:
+        burger_id = int(data_parts[3])
+    except ValueError:
+        await bot.send_message(callback_query.message.chat.id, 'Ошибка: некорректный идентификатор бургера.')
+        return
 
-        message_text = f'Добавлено {quantity} бургеров в корзину!'
-        if message_text:
-            await send_message(user_id, message_text, TOKEN)
-        else:
-            await send_message(user_id, 'Произошла ошибка при добавлении бургеров в корзину.', TOKEN)
+    user_id = callback_query.from_user.id
+    state = await database.async_get_user_state(user_id)
 
-        commands = [
-            '/start - Приветственное сообщение',
-            '/help - Список доступных команд',
-            '/burgers - Просмотр списка бургеров',
-            '/cart - Просмотр корзины',
-            '/remove_from_cart - Удалить бургер из корзины'
-        ]
+    if state and state.startswith('awaiting_quantity_'):
+        try:
+            quantity = int(state.split('_')[3])
+        except ValueError:
+            await bot.send_message(callback_query.message.chat.id, 'Ошибка: некорректное количество бургеров.')
+            return
+
+        await database.async_add_to_cart(user_id, burger_id, quantity)
+        await bot.send_message(callback_query.message.chat.id, f'Добавлено {quantity} бургеров в корзину!')
+        await database.async_save_user_state(user_id, 'start')
         await bot.send_message(callback_query.message.chat.id, 'Доступные команды:\n' + '\n'.join(commands))
+
+
+@dp.message(lambda message: message.text.isdigit())
+async def handle_quantity_input(message: types.Message):
+    user_id = message.from_user.id
+    user_state = await database.async_get_user_state(user_id)
+
+    if user_state and user_state.startswith('awaiting_quantity_'):
+        burger_id = int(user_state.split('_')[2])
+        quantity = int(message.text)
+
+        if quantity > 0:
+            try:
+                await database.async_add_to_cart(user_id, burger_id, quantity)
+                await message.reply(f'Добавлено {quantity} бургеров в корзину!')
+                await message.reply('Доступные команды:\n' + '\n'.join(commands))
+            except Exception as e:
+                print(f"Error adding to cart: {e}")
+                await message.reply('Произошла ошибка при добавлении бургеров в корзину.')
+
+            await database.async_save_user_state(user_id, 'start')
+        else:
+            await message.reply('Количество должно быть больше нуля.')
     else:
-        await bot.edit_message_text(text='Ошибка: неверный формат данных.', chat_id=callback_query.message.chat.id,
-                                    message_id=callback_query.message.message_id)
+        await message.reply('Неожиданный ввод. Пожалуйста, используйте команды бота.')
+
 
 @dp.message(Command("cart"))
 async def view_cart(message: types.Message):
     user_id = message.from_user.id
-    cart_items = database.get_cart(user_id)
+    await database.async_save_user_state(user_id, 'cart')
+    cart_items = await database.async_get_cart(user_id)
     if not cart_items:
         await message.reply('Ваша корзина пуста.')
         return
@@ -197,129 +226,49 @@ async def view_cart(message: types.Message):
         if burger_name in burger_counts:
             burger_counts[burger_name]['quantity'] += quantity
         else:
-            burger_counts[burger_name] = {'price': burger_price, 'quantity': quantity}
+            burger_counts[burger_name] = {'price': burger_price, 'quantity': quantity, 'id': item[0]}
 
+    keyboard = []
     for burger_name, data in burger_counts.items():
         cart_text += f'{burger_name} - {data["price"]} руб. (Количество: {data["quantity"]})\n'
         total_price += data["price"] * data["quantity"]
+        keyboard.append([InlineKeyboardButton(text=f'Удалить {burger_name}', callback_data=f'delete_{data["id"]}')])
 
     cart_text += f'\nИтого: {total_price} руб.'
 
-    keyboard = [[InlineKeyboardButton(text='Купить', callback_data='buy')]]
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    # Добавление кнопки "Купить"
+    keyboard.append([InlineKeyboardButton(text='Купить', callback_data='buy')])
 
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     await message.reply(cart_text, reply_markup=reply_markup)
 
-@dp.message(Command("remove_from_cart"))
-async def remove_from_cart(message: types.Message):
-    user_id = message.from_user.id
-    cart_items = database.get_cart(user_id)
-    if not cart_items:
-        await message.reply('Ваша корзина пуста.')
-        return
-
-    burger_counts = {}
-    for item in cart_items:
-        burger_id = item[0]
-        burger_name = item[1]
-        quantity = item[4]
-        if burger_id in burger_counts:
-            burger_counts[burger_id]['quantity'] += quantity
-        else:
-            burger_counts[burger_id] = {'name': burger_name, 'quantity': quantity}
-
-    keyboard = []
-    for burger_id, data in burger_counts.items():
-        keyboard.append([InlineKeyboardButton(text=f'Удалить {data["name"]} (Количество: {data["quantity"]})',
-                                              callback_data=f'remove_from_cart_{burger_id}')])
-
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await message.reply('Выберите бургер для удаления:', reply_markup=reply_markup)
-
-@dp.callback_query(lambda c: c.data and c.data.startswith('remove_from_cart_'))
-async def confirm_remove_from_cart(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-
-    data_parts = callback_query.data.split('_')
-    if len(data_parts) == 4 and data_parts[0] == 'remove' and data_parts[1] == 'from' and data_parts[2] == 'cart' and \
-            data_parts[3].isdigit():
-        burger_id = int(data_parts[3])
-        user_id = callback_query.from_user.id
-        cart_items = database.get_cart(user_id)
-        burger = next((b for b in cart_items if b[0] == burger_id), None)
-
-        if burger:
-            quantity = burger[4]
-            await bot.edit_message_text(
-                text=f'Сколько бургеров {burger[1]} вы хотите удалить? (Максимум: {quantity})',
-                chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
-            user_states[user_id]['remove_burger_id'] = burger_id
-            user_states[user_id]['remove_quantity'] = quantity
-        else:
-            await bot.edit_message_text(text='Бургер не найден в корзине.', chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
-    else:
-        await bot.edit_message_text(text='Ошибка: неверный формат данных.', chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
-
-@dp.message(lambda message: message.text.isdigit())
-async def handle_remove_quantity(message: types.Message):
-    user_input = message.text
-    try:
-        quantity_to_remove = int(user_input)
-        user_id = message.from_user.id
-        burger_id = user_states[user_id].get('remove_burger_id')
-        max_quantity = user_states[user_id].get('remove_quantity')
-
-        if max_quantity is None:
-            await message.reply('Ошибка: невозможно определить максимальное количество для удаления.')
-            return
-
-        if quantity_to_remove > 0 and quantity_to_remove <= max_quantity:
-            database.remove_from_cart(user_id, burger_id, quantity_to_remove)
-            await message.reply(f'Удалено {quantity_to_remove} бургеров.')
-
-            commands = [
-                '/start - Приветственное сообщение',
-                '/help - Список доступных команд',
-                '/burgers - Просмотр списка бургеров',
-                '/cart - Просмотр корзины',
-                '/remove_from_cart - Удалить бургер из корзины'
-            ]
-            await message.reply('Доступные команды:\n' + '\n'.join(commands))
-        else:
-            await message.reply(f'Введите число от 1 до {max_quantity}.')
-    except ValueError:
-        await message.reply('Пожалуйста, введите число.')
 
 @dp.callback_query(lambda c: c.data and c.data == 'buy')
 async def buy(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
 
     user_id = callback_query.from_user.id
-    cart_items = database.get_cart(user_id)
+    cart_items = await database.async_get_cart(user_id)
     if not cart_items:
-        await bot.edit_message_text('Ваша корзина пуста.', chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
+        await bot.edit_message_text('Ваша корзина пуста.', chat_id=callback_query.message.chat.id,
+                                    message_id=callback_query.message.message_id)
         return
 
     await send_invoice(callback_query)
+
 
 async def send_invoice(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
 
     user_id = callback_query.from_user.id
-    cart_items = database.get_cart(user_id)
+    cart_items = await database.async_get_cart(user_id)
     if not cart_items:
-        await bot.edit_message_text('Ваша корзина пуста.', chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
+        await bot.edit_message_text('Ваша корзина пуста.', chat_id=callback_query.message.chat.id,
+                                    message_id=callback_query.message.message_id)
         return
 
-    # Здесь можно добавить логику для расчета итоговой цены с учетом доставки
-    total_price = calculate_total_price(cart_items)
-
-    # Дополнительная проверка и логирование
-    if not isinstance(total_price, int):
-        logger.error(f"Total price is not an integer: {total_price}")
-        await bot.edit_message_text('Ошибка при расчете стоимости заказа. Пожалуйста, попробуйте позже.', chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
-        return
-
+    total_price = await calculate_total_price(cart_items)
+    logging.info("Sending invoice to user")
     await bot.send_invoice(
         chat_id=callback_query.message.chat.id,
         title='Оплата заказа',
@@ -335,54 +284,104 @@ async def send_invoice(callback_query: types.CallbackQuery):
         start_parameter='example',
         payload='some-invoice-payload'
     )
+    logging.info("Invoice sent successfully")
 
-def calculate_total_price(cart_items):
+
+async def calculate_total_price(cart_items):
     total_price = 0
     for item in cart_items:
         total_price += item[3] * item[4] * 100  # item[3] - цена в рублях, item[4] - количество
     return int(total_price)
 
-@dp.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-@dp.message(lambda message: message.successful_payment)
-async def process_successful_payment(message: types.Message):
-    print('Successful Payment')
-    payment_info = message.successful_payment.to_dict()
-    print(payment_info)
+@dp.callback_query(lambda c: c.data and c.data.startswith('delete_'))
+async def delete_burger(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
 
-    await message.reply('Спасибо за покупку! Ваш заказ оформлен.')
+    data_parts = callback_query.data.split('_')
+    if len(data_parts) == 2 and data_parts[0] == 'delete' and data_parts[1].isdigit():
+        burger_id = int(data_parts[1])
+        user_id = callback_query.from_user.id
+        cart_items = await database.async_get_cart(user_id)
+        burger = next((b for b in cart_items if b[0] == burger_id), None)
 
-@dp.message(Command("admin_remove_burger"))
-async def admin_remove_burger(message: types.Message):
-    user_id = message.from_user.id
-    if user_id != config.ADMIN_USER_ID:
-        await message.reply('У вас нет прав для выполнения этой команды.')
-        return
+        if burger:
+            quantity = burger[4]
+            builder = InlineKeyboardBuilder()
+            for i in range(1, quantity + 1):
+                builder.add(InlineKeyboardButton(text=str(i), callback_data=f'remove_{burger_id}_{i}'))
+            builder.adjust(3)  # Распределение кнопок по 3 в ряд
 
-    await message.reply('Пожалуйста, укажите id бургера, который вы хотите удалить.')
-    user_states[user_id]['state'] = 'awaiting_burger_id'
+            await bot.send_message(
+                chat_id=callback_query.message.chat.id,
+                text=f'Сколько бургеров {burger[1]} вы хотите удалить?',
+                reply_markup=builder.as_markup()
+            )
+        else:
+            await bot.send_message(
+                chat_id=callback_query.message.chat.id,
+                text='Бургер не найден в корзине.'
+            )
+    else:
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text='Ошибка: неверный формат данных.'
+        )
 
-@dp.message(lambda message: user_states.get(message.from_user.id, {}).get('state') == 'awaiting_burger_id')
-async def handle_burger_id(message: types.Message):
-    user_id = message.from_user.id
-    if user_id != config.ADMIN_USER_ID:
-        await message.reply('У вас нет прав для выполнения этой команды.')
-        return
 
-    user_input = message.text
-    try:
-        burger_id = int(user_input)
-        await database.async_remove_burger(burger_id)
-        await message.reply(f'Бургер с id {burger_id} успешно удален.')
-        await list_burgers(message)  # После удаления бургера, обновляем список бургеров
-    except ValueError:
-        await message.reply('Пожалуйста, введите корректный id бургера.')
+@dp.callback_query(lambda c: c.data and c.data.startswith('remove_'))
+async def remove_burger(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+
+    data_parts = callback_query.data.split('_')
+    if len(data_parts) == 3 and data_parts[0] == 'remove' and data_parts[1].isdigit() and data_parts[2].isdigit():
+        burger_id = int(data_parts[1])
+        quantity_to_remove = int(data_parts[2])
+        user_id = callback_query.from_user.id
+        cart_items = await database.async_get_cart(user_id)
+        burger = next((b for b in cart_items if b[0] == burger_id), None)
+
+        if burger:
+            quantity = burger[4]
+            if 0 < quantity_to_remove <= quantity:
+                await database.async_remove_from_cart(user_id, burger_id, quantity_to_remove)
+                await bot.send_message(
+                    chat_id=callback_query.message.chat.id,
+                    text=f'Удалено {quantity_to_remove} бургеров {burger[1]}.'
+                )
+                await bot.send_message(callback_query.message.chat.id, 'Доступные команды:\n' + '\n'.join(commands))
+            else:
+                await bot.send_message(
+                    chat_id=callback_query.message.chat.id,
+                    text='Неверное количество бургеров для удаления.'
+                )
+        else:
+            await bot.send_message(
+                chat_id=callback_query.message.chat.id,
+                text='Бургер не найден в корзине.'
+            )
+    else:
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text='Ошибка: неверный формат данных.'
+        )
+
 
 async def main():
     await dp.start_polling(bot)
 
+
+async def shutdown():
+    await bot.close()
+    await asyncio.sleep(0.1)
+
+
+def atexit_handler():
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(shutdown())
+
+
 if __name__ == '__main__':
     database.init_db()
+    atexit.register(atexit_handler)
     asyncio.run(main())
